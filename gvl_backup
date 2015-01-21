@@ -1,0 +1,121 @@
+#!/bin/bash
+
+# The backup directory , DO NOT END THE DIRECTORY WITH BACKSLASH ! 
+BACKUP_DIR=/mnt/galaxy/export/backup
+
+#
+#SWIFT Stuff!
+#
+
+SWIFT_AUTH='/home/ubuntu/bin/GenomicsVL-openrc.sh'
+SWIFT_TARGET_DIR='geneious_server_database_backups_sg_070715'
+
+#
+#PSQL Stuff
+#
+PSQL_USER='postgres'
+PSQL_DB='dental_geneious'
+
+#
+#Backup config Stuff
+#
+MONTHLY_BACKUP_DATE=1
+WEEKLY_BACKUP_DAY=6
+MAIL="simon.gladman@unimelb.edu.au"
+RETENTION_DAY=2
+RETENTION_WEEK=14
+RETENTION_MONTH=60
+
+#Log file
+LOGFILE=`date +"%d-%m-%Y"`'-log.txt'
+
+# STARTING BACKUP SCRIPT
+
+#Check date
+
+# Get current month and week day number
+month_day=`date +"%d"`
+week_day=`date +"%u"`
+
+# On first month day do
+  if [ "$month_day" -eq $MONTHLY_BACKUP_DATE ] ; then
+    BACKUP_TYPE='-monthly'
+    RETENTION_DAY_LOOKUP=$RETENTION_MONTH
+    
+    #COMPARATOR=4
+  else
+  # On saturdays do
+    if [ "$week_day" -eq $WEEKLY_BACKUP_DAY ] ; then
+      # weekly - keep for RETENTION_WEEK
+      BACKUP_TYPE='-weekly'
+      RETENTION_DAY_LOOKUP=$RETENTION_WEEK
+
+      #COMPARATOR=2
+    else
+      # On any regular day do
+      BACKUP_TYPE='-daily'
+      RETENTION_DAY_LOOKUP=$RETENTION_DAY
+
+      #COMPARATOR=1
+    fi
+  fi
+
+cd $BACKUP_DIR
+
+
+LOGFILE=`date +"%d-%m-%Y"`${BACKUP_TYPE}'-log.txt'
+
+#send preliminary stuff to logfile
+echo '' >> $LOGFILE
+echo '' >> $LOGFILE
+echo 'Date/time: '`date +"%d-%m-%Y %k:%M:%S"` >> $LOGFILE
+echo 'Month day: '$month_day >> $LOGFILE
+echo 'Week day: '$week_day >> $LOGFILE
+echo 'Backup type: '$BACKUP_TYPE >> $LOGFILE
+echo 'Swift details: '$SWIFT_HOST' '$SWIFT_TARGET_DIR >> $LOGFILE
+echo 'Database: '$PSQL_DB >> $LOGFILE
+echo 'Retention: '$RETENTION_DAY_LOOKUP >>$LOGFILE
+
+#create the backup filename
+
+backup_filename=`date +"%d-%m-%Y"`'-'$PSQL_DB$BACKUP_TYPE
+backup_filename=$backup_filename'.sql.gz'
+
+echo 'Backup filename: '$backup_filename >> $LOGFILE
+
+
+#create the file for backup!
+
+pg_dump -U $PSQL_USER $PSQL_DB | pigz > $backup_filename
+
+#delete anything that's too old!
+#put the filenames in a file so we can get rid of them from object store.
+find -maxdepth 1 -name "*${BACKUP_TYPE}*" -mtime $RETENTION_DAY_LOOKUP >> search_file.tmp
+sed "s/\.\///" search_file.tmp > 1.tmp
+cat 1.tmp > search_file.tmp
+rm 1.tmp
+echo 'Contents of search_file.tmp' >> $LOGFILE
+cat 'search_file.tmp' >> $LOGFILE
+
+#now delete the local copy
+#find -maxdepth 1 -name "*${BACKUP_TYPE}*" -mtime $RETENTION_DAY_LOOKUP -exec rm -rv {} \;
+
+#load the swift authorisations
+. "$SWIFT_AUTH"
+
+#copy the backup file to the cloud object store!
+swift upload $SWIFT_TARGET_DIR $backup_filename
+
+#now delete the old cloud backups
+for f in $(<search_file.tmp)
+#for f in `cat search_file.tmp`
+    do
+        echo $f
+        echo 'Deleting on swift: '$f #>> $LOGFILE
+        #delete cloud copy
+        swift delete $SWIFT_TARGET_DIR $f
+        #delete local copy
+        rm $f
+    done
+
+rm search_file.tmp
